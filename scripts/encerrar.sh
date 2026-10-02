@@ -60,6 +60,31 @@ if aws rds describe-db-instances --db-instance-identifier "$restore_id" \
   aws rds wait db-instance-deleted --db-instance-identifier "$restore_id" --region "$REGION"
 fi
 
+# O force_destroy do cofre não espera a exclusão dos snapshots do RDS; o
+# cofre só sai depois que eles somem de fato.
+vault="${PROJECT}-prod-backup"
+if aws backup describe-backup-vault --backup-vault-name "$vault" \
+     --region "$REGION" >/dev/null 2>&1; then
+  echo
+  echo "== Esvaziando o cofre $vault"
+  for rp in $(aws backup list-recovery-points-by-backup-vault \
+                --backup-vault-name "$vault" \
+                --query 'RecoveryPoints[].RecoveryPointArn' \
+                --output text --region "$REGION"); do
+    aws backup delete-recovery-point \
+      --backup-vault-name "$vault" \
+      --recovery-point-arn "$rp" \
+      --region "$REGION" 2>/dev/null || true
+  done
+  while [ "$(aws backup list-recovery-points-by-backup-vault \
+               --backup-vault-name "$vault" \
+               --query 'length(RecoveryPoints)' \
+               --output text --region "$REGION")" != "0" ]; do
+    echo "  aguardando a exclusão dos pontos de recuperação..."
+    sleep 15
+  done
+fi
+
 # shellcheck disable=SC2086
 destroy_layer terraform/envs/prod $DESTROY_VARS
 # shellcheck disable=SC2086
@@ -77,6 +102,13 @@ for family in "${PROJECT}-dev" "${PROJECT}-prod"; do
     aws ecs delete-task-definitions --task-definitions "$arn" --region "$REGION" >/dev/null
     echo "  apagada $arn"
   done
+done
+
+# O ECS ainda grava métricas logo depois do destroy e recria este log group sem retenção.
+for env in dev prod; do
+  aws logs delete-log-group \
+    --log-group-name "/aws/ecs/containerinsights/${PROJECT}-${env}/performance" \
+    --region "$REGION" 2>/dev/null || true
 done
 
 destroy_layer terraform/shared
