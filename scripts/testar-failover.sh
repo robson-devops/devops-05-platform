@@ -63,7 +63,16 @@ sleep 60
 
 kill "$probe_pid" 2>/dev/null || true
 wait "$probe_pid" 2>/dev/null || true
-after=$(az_of)
+
+# O AvailabilityZone da API demora a refletir a troca; os eventos do RDS são a fonte.
+minutes=$((($(date +%s) - started) / 60 + 2))
+events=$(aws rds describe-events \
+  --source-identifier "$db_id" \
+  --source-type db-instance \
+  --duration "$minutes" \
+  --query "Events[?contains(Message, 'failover')].[Date,Message]" \
+  --output text \
+  --region "$REGION")
 
 # Maior sequência de respostas diferentes de 200, em segundos.
 summary=$(awk -v start="$started" '
@@ -87,7 +96,8 @@ fail=$(printf '%s' "$summary" | awk '{print $2}')
 longest=$(printf '%s' "$summary" | awk '{print $3}')
 
 echo
-echo "Depois: primária $(printf '%s' "$after" | awk '{print $1}'), standby $(printf '%s' "$after" | awk '{print $2}')"
+echo "Eventos do RDS:"
+printf '%s\n' "$events" | sed 's/^/  /'
 echo "Requisições desde o failover: $total · com erro: $fail"
 echo "Maior janela sem banco vista pela aplicação: ${longest} s"
 echo "Log completo (epoch e código HTTP): $log"

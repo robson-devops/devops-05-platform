@@ -157,14 +157,22 @@ Esperado: `True` com AZs diferentes para a primária e a standby; duas tasks
 ```
 
 O script faz uma requisição por segundo em `/ready` pelo CloudFront, força o
-failover com `reboot-db-instance --force-failover` e mostra a troca de AZ e a
+failover com `reboot-db-instance --force-failover` e mostra os eventos do RDS e a
 maior janela em que a aplicação ficou sem banco.
+
+Resultado em 02/10/2026, com a primária em `us-east-1a`:
 
 | Medida | Resultado |
 |---|---|
-| Primária antes → depois | a preencher |
-| Requisições com erro | a preencher |
-| Maior janela sem banco | a preencher |
+| Failover segundo o RDS (`started` → `completed`) | 19:18:10 → 19:18:55, **45 s** |
+| Requisições com erro em `/ready` | 14 de 91 (`503` do banco indisponível e `000` por timeout de 2 s) |
+| Maior janela sem banco vista pela aplicação | **27 s** |
+
+A aplicação voltou antes do evento `completed`: o `pool_pre_ping` do
+SQLAlchemy descarta as conexões mortas e reconecta no novo primário assim que
+o DNS do endpoint muda. O atributo `AvailabilityZone` da API continuou
+mostrando a AZ antiga por alguns minutos depois do failover; por isso o
+script usa os eventos do RDS como fonte.
 
 ## 6. Pipeline e promoção
 

@@ -60,7 +60,12 @@ app = FastAPI(title="devops-05-platform", version=APP_VERSION, lifespan=lifespan
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "version": APP_VERSION, "environment": APP_ENV}
+    return {
+        "status": "ok",
+        "service": "devops-05-platform",
+        "version": APP_VERSION,
+        "environment": APP_ENV,
+    }
 
 
 @app.get("/ready")

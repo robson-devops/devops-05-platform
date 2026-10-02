@@ -130,6 +130,7 @@ gasto real chega a 80%. O e-mail fica no `terraform.tfvars`, fora do Git.
 | Assinatura da imagem | cosign keyless | Chave KMS | Nada para guardar nem rotacionar; a identidade é o workflow |
 | Verificação da assinatura | No pipeline, antes do deploy | Política de admissão no ECS | O ECS não verifica assinatura nativamente |
 | Teste de restauração | Script sob demanda | Restore testing do AWS Backup | Roda na hora do teste e mostra RPO e RTO na tela; o agendado está em `docs/producao.md` |
+| Classe do banco | `db.t3.micro` (x86) | `db.t4g.micro` (Graviton) | Na validação, a AWS ficou sem capacidade de t4g.micro com gp3 em us-east-1a e 1b; a t3.micro custa US$ 0,002 a mais por hora |
 | Desligar o dev | EventBridge Scheduler direto nas APIs | Lambda (projeto 4) | Sem código: o Scheduler chama `ecs:UpdateService` e `rds:StopDBInstance` |
 
 ## Melhorias Mensuráveis
@@ -139,7 +140,7 @@ Os números são preenchidos depois da validação na AWS, seguindo
 
 | Métrica | Resultado |
 |---|---|
-| Failover do RDS Multi-AZ: maior janela sem banco vista pela aplicação | a medir |
+| Failover do RDS Multi-AZ: maior janela sem banco vista pela aplicação | **27 s** (o RDS registrou 45 s de failover) |
 | Restauração do backup: RPO (idade do ponto) | a medir |
 | Restauração do backup: RTO (pedido até a instância disponível) | a medir |
 | Pipeline: push até a nova versão no dev | a medir |
