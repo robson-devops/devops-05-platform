@@ -223,18 +223,27 @@ Esperado: só ARNs com `devops-05-dev`.
 
 ## 7. Backup e restauração
 
-Depois da primeira execução do plano (03:00) ou com o backup sob demanda que
-o script dispara quando ainda não há ponto:
-
 ```bash
 ./scripts/testar-restauracao.sh
 ```
 
+O script grava uma tarefa marcadora no prod pelo CloudFront, faz um backup
+sob demanda, restaura esse ponto numa instância temporária e roda uma task
+avulsa do ECS, na rede do prod, apontando o `DB_HOST` para o banco
+restaurado. A task procura o marcador e termina com código 0 só se o
+encontrar. A instância temporária é apagada no fim, mesmo se o script falhar.
+
 | Medida | Resultado |
 |---|---|
-| RPO (idade do ponto restaurado) | a preencher |
+| RPO | até 24 h, pela frequência do plano diário |
 | RTO (pedido até a instância disponível) | a preencher |
+| Marcador encontrado no banco restaurado | a preencher |
 | Instância temporária apagada no fim | a preencher |
+
+Na primeira execução, a restauração falhou porque o script repassava todos os
+metadados do ponto de recuperação, e a AWS recusa o `DBSnapshotIdentifier`
+nessa chamada. O script passou a enviar só o necessário para a instância
+cair na rede do prod.
 
 ## 8. FinOps
 
