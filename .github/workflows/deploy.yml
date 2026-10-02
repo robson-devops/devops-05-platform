@@ -1,0 +1,128 @@
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Ambiente de destino (dev ou prod)
+        type: string
+        required: true
+      repository:
+        description: URL do repositório ECR
+        type: string
+        required: true
+      digest:
+        description: Digest da imagem assinada
+        type: string
+        required: true
+      version:
+        description: SHA do commit, conferido em /health depois do deploy
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ steps.smoke.outputs.url }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: us-east-1
+      CLUSTER: devops-05-${{ inputs.environment }}
+      SERVICE: devops-05-${{ inputs.environment }}
+      IMAGE: ${{ inputs.repository }}@${{ inputs.digest }}
+      SIGNER: https://github.com/${{ github.repository }}/.github/workflows/app.yml@refs/heads/main
+
+    steps:
+      # A role só aceita o token emitido para este GitHub Environment.
+      - name: Assumir a role de deploy do ambiente via OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login no ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Instalar o cosign
+        uses: sigstore/cosign-installer@v3.10.1
+        with:
+          cosign-release: v2.6.1
+
+      - name: Conferir a assinatura da imagem
+        run: |
+          cosign verify \
+            --certificate-identity "$SIGNER" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$IMAGE" >/dev/null
+          echo "Assinatura conferida: imagem gerada pelo pipeline na main."
+
+      - name: Conferir se o serviço existe
+        id: servico
+        run: |
+          status=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --query 'services[0].status' \
+            --output text 2>/dev/null || true)
+
+          if [ "$status" = "ACTIVE" ]; then
+            echo "existe=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "existe=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::O serviço $SERVICE ainda não existe. Aplique terraform/envs/${{ inputs.environment }} e rode o workflow de novo."
+          fi
+
+      - name: Baixar a task definition atual
+        if: steps.servico.outputs.existe == 'true'
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "$SERVICE" \
+            --query taskDefinition > task-definition.json
+
+      - name: Trocar a imagem
+        id: render
+        if: steps.servico.outputs.existe == 'true'
+        uses: aws-actions/amazon-ecs-render-task-definition@v1.9.0
+        with:
+          task-definition: task-definition.json
+          container-name: app
+          image: ${{ env.IMAGE }}
+
+      # Com o circuit breaker do ECS, um deploy que não estabiliza volta sozinho e o job falha.
+      - name: Registrar a revisão e atualizar o serviço
+        if: steps.servico.outputs.existe == 'true'
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2.6.3
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ env.CLUSTER }}
+          service: ${{ env.SERVICE }}
+          wait-for-service-stability: true
+          wait-for-minutes: 15
+
+      - name: Smoke test pelo CloudFront
+        id: smoke
+        if: steps.servico.outputs.existe == 'true' && vars.APP_URL != ''
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "url=${APP_URL}" >> "$GITHUB_OUTPUT"
+          for _ in $(seq 1 10); do
+            if curl -sf "${APP_URL}/health" | grep -q "\"version\":\"${VERSION}\""; then
+              curl -sf "${APP_URL}/ready"
+              echo
+              echo "Versão ${VERSION} no ar em ${APP_URL}"
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "::error::${APP_URL}/health não respondeu com a versão ${VERSION}"
+          exit 1

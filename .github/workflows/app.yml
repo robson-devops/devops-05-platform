@@ -1,0 +1,234 @@
+name: Aplicação
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "ruff.toml"
+      - ".github/workflows/app.yml"
+      - ".github/workflows/deploy.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "ruff.toml"
+      - ".github/workflows/app.yml"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: devops-05-app
+  RUFF_VERSION: 0.16.10
+  TRIVY_VERSION: 0.75.0
+  TRIVY_SHA256: c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
+
+jobs:
+  build:
+    name: Lint, build, testes, varredura e assinatura
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      repository: ${{ steps.push.outputs.repository }}
+      digest: ${{ steps.push.outputs.digest }}
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: appuser
+          POSTGRES_PASSWORD: cionly
+          POSTGRES_DB: tasksdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U appuser"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Lint do Python
+        run: |
+          pipx run "ruff==${RUFF_VERSION}" check app
+          pipx run "ruff==${RUFF_VERSION}" format --check app
+
+      # Sem provenance/sbom do BuildKit: geram manifestos sem tag no ECR imutável.
+      - name: Build da imagem
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --build-arg APP_VERSION="${GITHUB_SHA}" \
+            -t "app:${GITHUB_SHA}" \
+            app
+
+      - name: Teste de integração com PostgreSQL
+        run: |
+          docker run -d --name app-test --network host \
+            -e DB_HOST=127.0.0.1 \
+            -e DB_PORT=5432 \
+            -e DB_NAME=tasksdb \
+            -e DB_USER=appuser \
+            -e DB_PASSWORD=cionly \
+            -e DB_SSLMODE=disable \
+            -e APP_ENV=ci \
+            "app:${GITHUB_SHA}"
+
+          for _ in $(seq 1 20); do
+            curl -sf http://127.0.0.1:8000/ready >/dev/null && break
+            sleep 2
+          done
+
+          set -x
+          curl -sf http://127.0.0.1:8000/health | grep -q "\"version\":\"${GITHUB_SHA}\""
+          curl -sf http://127.0.0.1:8000/ready
+          id=$(curl -sf -X POST http://127.0.0.1:8000/tasks \
+            -H 'Content-Type: application/json' \
+            -d '{"title":"ci"}' | jq -r .id)
+          curl -sf "http://127.0.0.1:8000/tasks/${id}"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "http://127.0.0.1:8000/tasks/${id}")" = "204"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8000/tasks \
+            -H 'Content-Type: application/json' -d '{"title":""}')" = "422"
+          set +x
+
+          docker rm -f app-test
+
+      - name: Instalar o Trivy
+        run: |
+          file="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSfLO "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${file}"
+          echo "${TRIVY_SHA256}  ${file}" | sha256sum --check
+          tar xzf "$file" -C /usr/local/bin trivy
+          trivy --version
+
+      - name: Varredura de vulnerabilidades
+        run: |
+          trivy image \
+            --exit-code 1 \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --no-progress \
+            "app:${GITHUB_SHA}"
+
+      - name: Gerar o SBOM
+        run: |
+          trivy image \
+            --format cyclonedx \
+            --output sbom.cdx.json \
+            --no-progress \
+            "app:${GITHUB_SHA}"
+
+      - name: Guardar o SBOM
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.cdx.json
+          retention-days: 30
+
+      - name: Assumir a role de build via OIDC
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_BUILD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login no ECR
+        id: ecr
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push da imagem
+        id: push
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          repository="${REGISTRY}/${ECR_REPOSITORY}"
+
+          # Repositório imutável: reexecução no mesmo commit reaproveita a imagem.
+          if aws ecr describe-images \
+               --repository-name "$ECR_REPOSITORY" \
+               --image-ids imageTag="$GITHUB_SHA" >/dev/null 2>&1; then
+            echo "Imagem ${GITHUB_SHA} já publicada; pulando o push."
+          else
+            docker tag "app:${GITHUB_SHA}" "${repository}:${GITHUB_SHA}"
+            docker push "${repository}:${GITHUB_SHA}"
+          fi
+
+          digest=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$GITHUB_SHA" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+
+          echo "repository=${repository}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Instalar o cosign
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: sigstore/cosign-installer@v3.10.1
+        with:
+          cosign-release: v2.6.1
+
+      # Assinatura keyless: a identidade é este workflow na main, atestada pelo OIDC do GitHub.
+      - name: Assinar a imagem
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE: ${{ steps.push.outputs.repository }}@${{ steps.push.outputs.digest }}
+          SIGNER: https://github.com/${{ github.workflow_ref }}
+        run: |
+          if cosign verify \
+               --certificate-identity "$SIGNER" \
+               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+               "$IMAGE" >/dev/null 2>&1; then
+            echo "Imagem já assinada."
+          else
+            cosign sign --yes "$IMAGE"
+          fi
+
+  deploy-dev:
+    name: dev
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: dev
+      repository: ${{ needs.build.outputs.repository }}
+      digest: ${{ needs.build.outputs.digest }}
+      version: ${{ github.sha }}
+    secrets: inherit
+
+  # Mesma imagem (mesmo digest) do dev, depois da aprovação no GitHub Environment prod.
+  deploy-prod:
+    name: prod
+    needs: [build, deploy-dev]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: prod
+      repository: ${{ needs.build.outputs.repository }}
+      digest: ${{ needs.build.outputs.digest }}
+      version: ${{ github.sha }}
+    secrets: inherit

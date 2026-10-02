@@ -22,3 +22,7 @@ venv/
 .DS_Store
 .vscode/
 .idea/
+
+# Ferramentas
+.ruff_cache/
+*.cdx.json

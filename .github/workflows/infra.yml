@@ -1,0 +1,74 @@
+name: Infraestrutura
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bootstrap/**"
+      - "terraform/**"
+      - ".tflint.hcl"
+      - ".github/workflows/infra.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "bootstrap/**"
+      - "terraform/**"
+      - ".tflint.hcl"
+      - ".github/workflows/infra.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TERRAFORM_VERSION: 1.16.5
+  TFLINT_VERSION: v0.64.0
+  CHECKOV_VERSION: 3.3.22
+
+# O pipeline só valida. Quem aplica a infraestrutura é o operador (ver docs/producao.md).
+jobs:
+  validacao:
+    name: fmt, validate, tflint e checkov
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Instalar o Terraform
+        uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      - name: terraform validate
+        run: |
+          for dir in bootstrap terraform/shared terraform/envs/dev terraform/envs/prod; do
+            echo "== $dir"
+            terraform -chdir="$dir" init -backend=false -input=false >/dev/null
+            terraform -chdir="$dir" validate
+          done
+
+      - name: Instalar o tflint
+        uses: terraform-linters/setup-tflint@v6.3.2
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+
+      - name: tflint
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          tflint --init --config "$GITHUB_WORKSPACE/.tflint.hcl"
+          tflint --recursive --config "$GITHUB_WORKSPACE/.tflint.hcl"
+
+      - name: checkov
+        run: |
+          pipx run "checkov==${CHECKOV_VERSION}" \
+            --directory . \
+            --framework terraform github_actions \
+            --quiet \
+            --compact
