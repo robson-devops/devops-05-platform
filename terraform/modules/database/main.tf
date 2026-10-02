@@ -22,9 +22,11 @@ resource "aws_db_parameter_group" "main" {
   name   = "${local.identifier}-postgres${var.engine_version}"
   family = "postgres${var.engine_version}"
 
+  # Parâmetro estático: a AWS só aceita aplicar no próximo reboot.
   parameter {
-    name  = "rds.force_ssl"
-    value = "1"
+    name         = "rds.force_ssl"
+    value        = "1"
+    apply_method = "pending-reboot"
   }
 
   # Só DDL: registrar toda consulta gravaria também os dados.

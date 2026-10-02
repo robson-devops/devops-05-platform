@@ -212,7 +212,7 @@ us-east-1:
 | Item | dev | prod |
 |---|---|---|
 | NAT Gateway | 1 × US$ 0,045 | 2 × US$ 0,045 |
-| RDS db.t4g.micro | US$ 0,016 | US$ 0,032 (Multi-AZ) |
+| RDS db.t3.micro | US$ 0,018 | US$ 0,036 (Multi-AZ) |
 | ALB | US$ 0,0225 | US$ 0,0225 |
 | Fargate 0,25 vCPU / 0,5 GB | 1 × ~US$ 0,012 | 2 × ~US$ 0,012 |
 | IPv4 público (NAT e ALB) | 3 × US$ 0,005 | 4 × US$ 0,005 |

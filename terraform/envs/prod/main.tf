@@ -25,7 +25,7 @@ module "platform" {
   }
 
   database = {
-    instance_class = "db.t4g.micro"
+    instance_class = "db.t3.micro"
     multi_az       = true
   }
 
